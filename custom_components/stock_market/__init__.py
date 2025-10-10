@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import aiohttp
 import json
 from homeassistant.config_entries import ConfigEntry
@@ -11,7 +11,10 @@ from .const import (
     API_BASE_URL, 
     DEFAULT_FIELDS, 
     STOCK_PREFIXES, 
-    FIELD_MAPPING
+    FIELD_MAPPING,
+    MARKET_TRADING_HOURS,
+    DEFAULT_SCAN_INTERVAL_TRADE,
+    DEFAULT_SCAN_INTERVAL_NON_TRADE
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,22 +71,74 @@ class StockDataUpdateCoordinator(DataUpdateCoordinator):
         self.market_type = entry.data.get("market_type")
         self.market_code = entry.data.get("market_code")  # 直接从配置中获取市场代码
         
-        # 获取刷新间隔，如果没有设置则使用默认值
-        scan_interval = entry.options.get("scan_interval", 300)  # 默认5分钟
+        # 获取交易时间段和非交易时间段的更新间隔
+        self.scan_interval_trade = entry.options.get("scan_interval_trade", DEFAULT_SCAN_INTERVAL_TRADE)
+        self.scan_interval_non_trade = entry.options.get("scan_interval_non_trade", DEFAULT_SCAN_INTERVAL_NON_TRADE)
         
         # 使用市场代码和股票代码组合作为名称，确保不同市场的相同股票代码不会冲突
         coordinator_name = f"{DOMAIN}_{self.market_code}_{self.stock_code}"
+        
+        # 初始使用非交易时间段的更新间隔
+        initial_interval = self._get_current_scan_interval()
         
         super().__init__(
             hass,
             logger,
             name=coordinator_name,
-            update_interval=timedelta(seconds=scan_interval),
+            update_interval=timedelta(seconds=initial_interval),
         )
+        
+        # 存储上一次的更新间隔，用于检测变化
+        self._last_used_interval = initial_interval
     
+    def _is_trading_hours(self):
+        """判断当前是否处于交易时间段内"""
+        # 获取当前时间（北京时间）
+        now = datetime.now().time()
+        today = datetime.now().weekday()
+        
+        # 检查是否为周末（不同市场可能有不同的交易日历，这里简化处理）
+        if today >= 5:  # 0=周一, 1=周二, ..., 4=周五, 5=周六, 6=周日
+            return False
+        
+        # 获取该市场的交易时间段配置
+        trading_hours = MARKET_TRADING_HOURS.get(self.market_type, [])
+        
+        # 检查是否在任何一个交易时间段内
+        for start_time_str, end_time_str in trading_hours:
+            # 解析时间字符串为time对象
+            start_time = time.fromisoformat(start_time_str)
+            end_time = time.fromisoformat(end_time_str)
+            
+            # 处理跨午夜的情况（如美股）
+            if start_time > end_time:
+                # 如果当前时间在开始时间到23:59或00:00到结束时间之间，则处于交易时间
+                if now >= start_time or now <= end_time:
+                    return True
+            else:
+                # 正常的时间段判断
+                if start_time <= now <= end_time:
+                    return True
+        
+        return False
+        
+    def _get_current_scan_interval(self):
+        """根据当前是否处于交易时间段返回相应的更新间隔"""
+        if self._is_trading_hours():
+            return self.scan_interval_trade
+        else:
+            return self.scan_interval_non_trade
+            
     async def _async_update_data(self):
         """异步更新数据"""
         try:
+            # 检查并调整更新间隔
+            current_interval = self._get_current_scan_interval()
+            if current_interval != self._last_used_interval:
+                self.update_interval = timedelta(seconds=current_interval)
+                self._last_used_interval = current_interval
+                _LOGGER.debug(f"调整更新间隔: {current_interval}秒, 交易时间: {self._is_trading_hours()}")
+                
             # 直接使用保存的市场代码构建完整股票代码，避免映射错误
             full_code = f"{self.market_code}.{self.stock_code}"
             

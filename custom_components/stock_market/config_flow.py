@@ -5,7 +5,7 @@ from homeassistant.data_entry_flow import FlowResult
 import voluptuous as vol
 import aiohttp
 import json
-from .const import DOMAIN, PLATFORM_NAME
+from .const import DOMAIN, PLATFORM_NAME, DEFAULT_SCAN_INTERVAL_TRADE, DEFAULT_SCAN_INTERVAL_NON_TRADE
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,17 +119,20 @@ class StockMarketOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=user_input)
         
         # 使用基类提供的config_entry属性访问选项
-        scan_interval = self.config_entry.options.get("scan_interval", 300)
+        scan_interval_trade = self.config_entry.options.get("scan_interval_trade", DEFAULT_SCAN_INTERVAL_TRADE)
+        scan_interval_non_trade = self.config_entry.options.get("scan_interval_non_trade", DEFAULT_SCAN_INTERVAL_NON_TRADE)
         
         # 显示选项表单
         data_schema = vol.Schema({
-            vol.Required("scan_interval", default=scan_interval): vol.All(vol.Coerce(int), vol.Range(min=60, max=3600)),
+            vol.Required("scan_interval_trade", default=scan_interval_trade): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
+            vol.Required("scan_interval_non_trade", default=scan_interval_non_trade): vol.All(vol.Coerce(int), vol.Range(min=300, max=86400)),
         })
         
         return self.async_show_form(
             step_id="init",
             data_schema=data_schema,
             description_placeholders={
-                "scan_interval": "数据刷新间隔（秒）"
+                "scan_interval_trade": "交易时间段内的数据刷新间隔（秒）",
+                "scan_interval_non_trade": "非交易时间段内的数据刷新间隔（秒）"
             }
         )

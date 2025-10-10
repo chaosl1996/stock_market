@@ -16,6 +16,8 @@ class StockMarketSensor(CoordinatorEntity, SensorEntity):
     """股票市场传感器"""
     _attr_has_entity_name = True
     _attr_icon = DEFAULT_SENSOR_ICON
+    _attr_device_class = "monetary"
+    _attr_state_class = "measurement"
 
     def __init__(self, coordinator, config_entry):
         """初始化传感器"""

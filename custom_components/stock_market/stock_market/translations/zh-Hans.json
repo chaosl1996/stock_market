@@ -1,0 +1,27 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "配置股票市场信息",
+        "data": {
+          "full_code": "股票代码",
+          "stock_name": "股票名称"
+        }
+      }
+    },
+    "error": {
+      "invalid_stock_code": "无效的股票代码格式，请使用市场代码.股票代码格式",
+      "stock_not_found": "未找到该股票信息，请检查代码是否正确"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "股票市场信息选项",
+        "data": {
+          "update_interval": "更新间隔（分钟）"
+        }
+      }
+    }
+  }
+}

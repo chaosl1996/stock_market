@@ -1,11 +1,11 @@
 {
   "domain": "stock_market",
   "name": "股票市场信息",
-  "description": "获取和显示中国股票市场的实时行情数据",
-  "version": "0.1.0",
-  "documentation": "https://github.com/example/stock_market",
+  "description": "获取和显示全球股票市场的实时行情数据，支持新浪财经数据源",
+  "version": "0.4.0",
+  "documentation": "https://github.com/chaosl1996/stock_market",
   "requirements": ["aiohttp>=3.9.0"],
-  "codeowners": ["@example"],
+  "codeowners": ["@chaosl1996"],
   "config_flow": true,
   "iot_class": "cloud_polling",
   "homeassistant": "2023.8.0"

@@ -1,15 +1,11 @@
+from datetime import datetime
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     DOMAIN, 
     DEFAULT_SENSOR_NAME, 
     DEFAULT_SENSOR_ICON,
-    UNIT_CURRENT_PRICE, 
-    UNIT_CHANGE_AMOUNT, 
-    UNIT_VOLUME, 
-    UNIT_TURNOVER, 
-    UNIT_TURNOVER_RATE, 
-    UNIT_AMPLITUDE
+    DATA_SOURCE_SINA
 )
 
 class StockMarketSensor(CoordinatorEntity, SensorEntity):
@@ -22,18 +18,20 @@ class StockMarketSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, config_entry):
         """初始化传感器"""
         super().__init__(coordinator)
-        # 使用市场类型和股票代码生成唯一ID，以区分同一代码但不同市场类型的股票
+        # 使用股票代码和配置条目ID生成唯一ID，确保每个传感器实例都有唯一的ID
         stock_code = config_entry.data.get('stock_code')
-        market_type = config_entry.data.get('market_type')
-        self._attr_unique_id = f"{DOMAIN}_{market_type}_{stock_code}"
+        data_source = config_entry.data.get('data_source', DATA_SOURCE_SINA)
+        entry_id = config_entry.entry_id
+        self._attr_unique_id = f"{DOMAIN}_{data_source}_{stock_code}_{entry_id[:8]}"
         self.stock_code = stock_code
         self.stock_name = config_entry.data.get('stock_name')
+        self.data_source = data_source
         
         # 设置实体名称为股票名称（将在API数据更新后自动显示实际名称）
         self._attr_name = self.stock_name
         
-        # 设置单位
-        self._attr_unit_of_measurement = UNIT_CURRENT_PRICE
+        # 初始单位为空，将根据API返回的货币类型设置
+        self._attr_unit_of_measurement = ""
 
     @property
     def state(self):
@@ -45,8 +43,12 @@ class StockMarketSensor(CoordinatorEntity, SensorEntity):
     def _handle_coordinator_update(self) -> None:
         """当协调器数据更新时调用此方法"""
         # 当API返回新数据时，更新实体名称为最新的股票名称
-        if self.coordinator.data and self.coordinator.data.get("name"):
-            self._attr_name = self.coordinator.data.get("name")
+        if self.coordinator.data:
+            if self.coordinator.data.get("name"):
+                self._attr_name = self.coordinator.data.get("name")
+            # 设置单位为货币符号（从API数据中获取）
+            if self.coordinator.data.get("currency"):
+                self._attr_unit_of_measurement = self.coordinator.data.get("currency")
         # 调用父类方法通知状态更新
         super()._handle_coordinator_update()
 
@@ -67,31 +69,29 @@ class StockMarketSensor(CoordinatorEntity, SensorEntity):
             "change_amount": data.get("change_amount"),
             "prev_close": data.get("prev_close"),
             "volume": data.get("volume"),
-            "turnover": data.get("turnover"),
-            "amplitude": data.get("amplitude"),
-            "turnover_rate": data.get("turnover_rate"),
-            "timestamp": data.get("timestamp")
+            "currency": data.get("currency")
         }
         
-        # 添加单位属性，遵循Home Assistant标准
-        # 注意：current_price的单位已经在_attr_unit_of_measurement中设置
-        attributes.update({
-            "unit_of_change_amount": UNIT_CHANGE_AMOUNT,
-            "unit_of_volume": UNIT_VOLUME,
-            "unit_of_turnover": UNIT_TURNOVER,
-            "unit_of_amplitude": UNIT_AMPLITUDE,
-            "unit_of_turnover_rate": UNIT_TURNOVER_RATE
-        })
+        # 转换timestamp为可读的时间日期格式
+        timestamp = data.get("timestamp")
+        if timestamp:
+            attributes["timestamp"] = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 过滤掉值为None的属性
+        attributes = {k: v for k, v in attributes.items() if v is not None}
         
         return attributes
 
     @property
     def device_info(self):
         """返回设备信息"""
+        # 固定使用新浪财经作为制造商
+        manufacturer = "新浪财经"
+        
         return {
-            "identifiers": {(DOMAIN, self.stock_code)},
+            "identifiers": {(DOMAIN, f"{self.data_source}_{self.stock_code}")},
             "name": self.stock_name,
-            "manufacturer": "东方财富网",
+            "manufacturer": manufacturer,
             "model": "股票数据",
             "sw_version": "1.0"
         }

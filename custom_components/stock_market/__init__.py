@@ -1,20 +1,22 @@
-import asyncio
 import logging
-from datetime import datetime, timedelta, time
+import time
+import asyncio
+import re
+from datetime import timedelta
 import aiohttp
-import json
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from .const import (
     DOMAIN, 
-    API_BASE_URL, 
-    DEFAULT_FIELDS, 
-    STOCK_PREFIXES, 
-    FIELD_MAPPING,
-    MARKET_TRADING_HOURS,
-    DEFAULT_SCAN_INTERVAL_TRADE,
-    DEFAULT_SCAN_INTERVAL_NON_TRADE
+    DEFAULT_SCAN_INTERVAL,
+    MIN_SCAN_INTERVAL,
+    DATA_SOURCE_SINA,
+    REQUEST_TIMEOUT,
+    MAX_LINE_SIZE,
+    SINA_API_BASE_URL,
+    SINA_REQUEST_TIMEOUT
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -30,7 +32,7 @@ async def async_setup(hass: HomeAssistant, config: dict):
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """设置配置条目"""
     # 创建数据更新协调器
-    coordinator = StockDataUpdateCoordinator(hass, _LOGGER, entry)
+    coordinator = StockDataCoordinator(hass, _LOGGER, entry)
     
     # 注册协调器到hass数据中
     hass.data[DOMAIN][entry.entry_id] = coordinator
@@ -42,7 +44,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     
     # 支持选项更新
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    entry.async_on_unload(entry.add_update_listener(async_update_options))
     
     return True
 
@@ -54,154 +56,158 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
     
-    return unload_ok
+    return True
 
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    """重新加载配置条目"""
-    await async_unload_entry(hass, entry)
-    await async_setup_entry(hass, entry)
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry):
+    """更新配置选项"""
+    # 获取现有的协调器
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    
+    # 更新协调器的刷新间隔
+    scan_interval = entry.options.get("scan_interval", DEFAULT_SCAN_INTERVAL)
+    coordinator.update_interval = timedelta(seconds=scan_interval)
+    
+    # 触发立即更新
+    await coordinator.async_refresh()
 
-class StockDataUpdateCoordinator(DataUpdateCoordinator):
-    """股票数据更新协调器"""
+class StockDataCoordinator(DataUpdateCoordinator):
+    """股票数据更新协调器，仅使用新浪财经数据源"""
     def __init__(self, hass, logger, entry):
         self.hass = hass
         self.entry = entry
         self.stock_code = entry.data.get("stock_code")
         self.stock_name = entry.data.get("stock_name")
-        self.market_type = entry.data.get("market_type")
-        self.market_code = entry.data.get("market_code")  # 直接从配置中获取市场代码
+        self.data_source = DATA_SOURCE_SINA  # 固定使用新浪数据源
         
-        # 获取交易时间段和非交易时间段的更新间隔
-        self.scan_interval_trade = entry.options.get("scan_interval_trade", DEFAULT_SCAN_INTERVAL_TRADE)
-        self.scan_interval_non_trade = entry.options.get("scan_interval_non_trade", DEFAULT_SCAN_INTERVAL_NON_TRADE)
+        # 获取刷新间隔，优先使用选项中的配置，否则使用默认值
+        scan_interval = entry.options.get("scan_interval", DEFAULT_SCAN_INTERVAL)
         
-        # 使用市场代码和股票代码组合作为名称，确保不同市场的相同股票代码不会冲突
-        coordinator_name = f"{DOMAIN}_{self.market_code}_{self.stock_code}"
+        # 创建会话，增加max_field_size和max_line_size以避免Header过长错误
+        self.websession = async_create_clientsession(
+            hass, 
+            max_field_size=MAX_LINE_SIZE, 
+            max_line_size=MAX_LINE_SIZE
+        )
         
-        # 初始使用非交易时间段的更新间隔
-        initial_interval = self._get_current_scan_interval()
+        # 使用股票代码作为名称
+        coordinator_name = f"{DOMAIN}_{self.stock_code}_{self.data_source}"
         
         super().__init__(
             hass,
             logger,
             name=coordinator_name,
-            update_interval=timedelta(seconds=initial_interval),
+            update_interval=timedelta(seconds=scan_interval),
         )
-        
-        # 存储上一次的更新间隔，用于检测变化
-        self._last_used_interval = initial_interval
     
-    def _is_trading_hours(self):
-        """判断当前是否处于交易时间段内"""
-        # 获取当前时间（北京时间）
-        now = datetime.now().time()
-        today = datetime.now().weekday()
+    async def _fetch_sina_data(self):
+        """从新浪API获取数据"""
+        _LOGGER.info(f"从新浪API获取股票数据: {self.stock_name}({self.stock_code})")
         
-        # 检查是否为周末（不同市场可能有不同的交易日历，这里简化处理）
-        if today >= 5:  # 0=周一, 1=周二, ..., 4=周五, 5=周六, 6=周日
-            return False
+        # 直接使用用户输入的股票代码格式，例如sh000001、sz002594
+        sina_symbol = self.stock_code.strip()
         
-        # 获取该市场的交易时间段配置
-        trading_hours = MARKET_TRADING_HOURS.get(self.market_type, [])
+        # 构建新浪API请求URL，正确格式为http://hq.sinajs.cn/list=sh000001
+        url = f"{SINA_API_BASE_URL}/list={sina_symbol}"
+        _LOGGER.info(f"新浪API请求URL: {url}")
         
-        # 检查是否在任何一个交易时间段内
-        for start_time_str, end_time_str in trading_hours:
-            # 解析时间字符串为time对象
-            start_time = time.fromisoformat(start_time_str)
-            end_time = time.fromisoformat(end_time_str)
-            
-            # 处理跨午夜的情况（如美股）
-            if start_time > end_time:
-                # 如果当前时间在开始时间到23:59或00:00到结束时间之间，则处于交易时间
-                if now >= start_time or now <= end_time:
-                    return True
-            else:
-                # 正常的时间段判断
-                if start_time <= now <= end_time:
-                    return True
-        
-        return False
-        
-    def _get_current_scan_interval(self):
-        """根据当前是否处于交易时间段返回相应的更新间隔"""
-        if self._is_trading_hours():
-            return self.scan_interval_trade
-        else:
-            return self.scan_interval_non_trade
-            
-    async def _async_update_data(self):
-        """异步更新数据"""
         try:
-            # 检查并调整更新间隔
-            current_interval = self._get_current_scan_interval()
-            if current_interval != self._last_used_interval:
-                self.update_interval = timedelta(seconds=current_interval)
-                self._last_used_interval = current_interval
-                _LOGGER.debug(f"调整更新间隔: {current_interval}秒, 交易时间: {self._is_trading_hours()}")
+            async with asyncio.timeout(SINA_REQUEST_TIMEOUT):
+                # 添加请求头，模拟浏览器访问
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                    "Referer": "http://finance.sina.com.cn/",
+                    "Accept-Language": "zh-CN,zh;q=0.9"
+                }
+                response = await self.websession.get(url, headers=headers)
                 
-            # 直接使用保存的市场代码构建完整股票代码，避免映射错误
-            full_code = f"{self.market_code}.{self.stock_code}"
-            
-            # 构建API请求URL
-            url = f"{API_BASE_URL}?fltt=2&fields={DEFAULT_FIELDS}&secids={full_code}"
-            
-            _LOGGER.debug(f"获取股票数据: {self.stock_name}({self.stock_code}), 市场类型: {self.market_type}, 完整代码: {full_code}, URL: {url}")
-            
-            # 发送请求获取数据
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=10) as response:
-                    if response.status != 200:
-                        raise UpdateFailed(f"请求失败，状态码: {response.status}")
+                _LOGGER.info(f"新浪API响应状态: {response.status}")
+                
+                if response.status == 200:
+                    # 新浪API返回的是JavaScript字符串格式，例如：var hq_str_sh000001="上证指数,3000.00,1.00,0.03,10000000,100000000";
+                    # 新浪API返回的是GB2312编码，需要转换为UTF-8
+                    result_bytes = await response.read()
+                    result_text = result_bytes.decode('gb2312', errors='replace')
+                    _LOGGER.info(f"新浪API原始响应: {result_text}")
                     
-                    # 解析响应数据
-                    # 先获取文本内容，然后手动解析为JSON（处理text/plain类型响应）
-                    text_content = await response.text()
-                    try:
-                        data = json.loads(text_content)
-                    except json.JSONDecodeError as e:
-                        raise UpdateFailed(f"解析JSON数据失败: {str(e)}")
+                    # 解析新浪API返回的字符串格式
+                    # 格式：var hq_str_sh000001="股票名称,当前价格,昨收价,今开价,最高价,最低价,买一价,卖一价,成交量,成交额,买一量,买一价,买二量,买二价,...";
+                    pattern = r'var hq_str_\w+="([^"]+)";'  # 匹配引号内的内容
+                    match = re.search(pattern, result_text)
                     
-                    # 检查数据是否有效
-                    if data.get("rc") != 0:
-                        error_code = data.get("rc")
-                        market_specific_error = f"{self.market_type}市场的股票数据获取失败。请注意，不同市场可能需要特定的API支持。\n" \
-                                              f"股票代码: {self.stock_code}\n" \
-                                              f"完整代码: {full_code}\n" \
-                                              f"请检查股票代码是否正确或尝试其他市场类型。"
+                    if match:
+                        stock_data_str = match.group(1)
+                        stock_data_list = stock_data_str.split(',')
+                        _LOGGER.info(f"新浪API解析后的数据列表: {stock_data_list}")
                         
-                        raise UpdateFailed(f"API返回错误 (代码: {error_code}): {market_specific_error}")
-                    
-                    # 提取股票数据
-                    stock_data = data.get("data", {}).get("diff", [])
-                    if not stock_data:
-                        raise UpdateFailed(f"未找到股票数据: {self.stock_code}")
-                    
-                    # 将API返回的字段映射为有意义的名称
-                    mapped_data = self._map_stock_data(stock_data[0])
-                    
-                    # 添加元数据
-                    mapped_data["timestamp"] = datetime.now().isoformat()
-                    
-                    _LOGGER.debug(f"成功获取股票数据: {mapped_data}")
-                    
-                    return mapped_data
+                        if len(stock_data_list) >= 11:  # 确保有足够的数据字段
+                            # 解析数据
+                            name = stock_data_list[0]
+                            _LOGGER.info(f"解析股票名称: {name}")
+                            
+                            # 确保价格字段可以转换为浮点数
+                            try:
+                                # 新浪API字段顺序：
+                                # 0: 股票名称
+                                # 1: 今开价
+                                # 2: 昨收价
+                                # 3: 当前价格
+                                # 4: 最高价
+                                # 5: 最低价
+                                # 6: 买一价
+                                # 7: 卖一价
+                                # 8: 成交量
+                                # 9: 成交额
+                                open_price = float(stock_data_list[1])
+                                prev_close = float(stock_data_list[2])
+                                current_price = float(stock_data_list[3])  # 当前价格在索引3
+                                volume = int(stock_data_list[8])  # 成交量
+                                
+                                _LOGGER.info(f"解析价格数据 - 当前价格: {current_price}, 昨收价: {prev_close}, 今开价: {open_price}")
+                                
+                                # 计算涨跌幅和涨跌额
+                                change_amount = current_price - prev_close
+                                change_percent = (change_amount / prev_close) * 100 if prev_close != 0 else 0
+                                
+                                # 构建返回数据
+                                stock_data = {
+                                    "current_price": current_price,
+                                    "change_amount": change_amount,
+                                    "change_percent": round(change_percent, 2),  # 保留两位小数
+                                    "prev_close": prev_close,
+                                    "open_price": open_price,
+                                    "volume": volume,
+                                    "name": name,
+                                    "code": self.stock_code,
+                                    "currency": "CNY",  # 新浪API主要针对A股，默认使用人民币
+                                    "timestamp": time.time()
+                                }
+                                _LOGGER.info(f"最终解析后的股票数据: {stock_data}")
+                                return stock_data
+                            except ValueError as e:
+                                _LOGGER.error(f"解析价格数据失败: {e}, 原始数据: {stock_data_list[1:4]}")
+                                return None
+                        else:
+                            _LOGGER.error(f"新浪API返回的数据字段不足，期望至少11个字段，实际得到: {len(stock_data_list)}个字段")
+                    else:
+                        _LOGGER.error(f"新浪API响应格式错误，无法匹配数据，正则表达式: {pattern}")
+                else:
+                    _LOGGER.error(f"新浪API请求失败，状态码: {response.status}, 响应头: {dict(response.headers)}")
+        except asyncio.TimeoutError:
+            _LOGGER.error(f"新浪API请求超时")
+        except aiohttp.ClientError as e:
+            _LOGGER.error(f"新浪API请求客户端错误: {str(e)}")
         except Exception as e:
-            _LOGGER.error(f"获取股票数据失败: {str(e)}")
-            raise UpdateFailed(f"获取股票数据失败: {str(e)}")
+            _LOGGER.error(f"新浪API请求未知错误: {str(e)}", exc_info=True)
+        
+        return None
     
-    def _map_stock_data(self, raw_data):
-        """将原始数据映射为有意义的字段名称"""
-        mapped_data = {}
+    async def _async_update_data(self):
+        """异步更新数据 - 仅使用新浪财经API"""
+        _LOGGER.debug(f"获取股票数据: {self.stock_name}({self.stock_code})，数据源: {self.data_source}")
         
-        for key, value in raw_data.items():
-            # 使用映射表转换字段名
-            field_name = FIELD_MAPPING.get(key, key)
-            mapped_data[field_name] = value
-        
-        # 确保股票名称和代码正确
-        if "name" not in mapped_data or not mapped_data["name"]:
-            mapped_data["name"] = self.stock_name
-        if "code" not in mapped_data or not mapped_data["code"]:
-            mapped_data["code"] = self.stock_code
-        
-        return mapped_data
+        # 使用新浪API获取数据
+        data = await self._fetch_sina_data()
+        if data:
+            return data
+        else:
+            raise UpdateFailed("无法从新浪API获取数据")

@@ -42,6 +42,20 @@
 - 贵州茅台：sh600519
 - 招商银行：sh600036
 - 比亚迪：sz002594
+- 美股（纳斯达克、纽约证券交易所）：
+  - 苹果（NASDAQ）：gb_aapl
+  - 微软（NASDAQ）：gb_msft
+  - 亚马逊（NASDAQ）：gb_amzn
+  - 特斯拉（NASDAQ）：gb_tsla
+  - 谷歌（NASDAQ）：gb_googl
+  - VRT（NYSE）：gb_vrt
+- 美股指数：
+  - 纳斯达克综合指数：gb_ixic
+  - 道琼斯工业平均指数：gb_dji
+  - 标普500指数：gb_spx
+- 港股：
+  - 腾讯控股：hk00700
+  - 阿里巴巴：hk9988
 
 ## 实体属性
 

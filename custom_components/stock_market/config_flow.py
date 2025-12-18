@@ -29,10 +29,14 @@ class StockMarketConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @staticmethod
     def async_get_options_flow(config_entry):
         """获取选项流"""
-        return StockMarketOptionsFlow(config_entry)
+        # 创建OptionsFlow实例，不需要直接传递config_entry参数
+        # Home Assistant会在内部处理config_entry的设置
+        return StockMarketOptionsFlow()
 
 class StockMarketOptionsFlow(config_entries.OptionsFlow):
     """股票市场选项流"""
+    
+    # 不需要显式设置config_entry，基类已经提供了该属性
     
     async def async_step_init(self, user_input=None):
         """处理配置选项更新"""

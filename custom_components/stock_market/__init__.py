@@ -139,55 +139,76 @@ class StockDataCoordinator(DataUpdateCoordinator):
                         stock_data_list = stock_data_str.split(',')
                         _LOGGER.info(f"新浪API解析后的数据列表: {stock_data_list}")
                         
-                        if len(stock_data_list) >= 11:  # 确保有足够的数据字段
-                            # 解析数据
-                            name = stock_data_list[0]
-                            _LOGGER.info(f"解析股票名称: {name}")
+                        # 解析数据
+                        try:
+                            # 自动检测数据格式：检查第一个字段是否为数字
+                            first_field = stock_data_list[0]
+                            if first_field.replace('.', '', 1).isdigit() or (first_field.startswith('-') and first_field[1:].replace('.', '', 1).isdigit()):
+                                # 格式1：第一个字段是数字，可能是直接的价格数据
+                                # 适用于某些特殊格式的数据
+                                current_price = float(first_field)
+                                change_percent = float(stock_data_list[1]) if len(stock_data_list) > 1 else 0
+                                change_amount = current_price * change_percent / 100
+                                prev_close = current_price - change_amount
+                                open_price = current_price
+                                volume = 0
+                                name = self.stock_name
+                                currency = "USD" if self.stock_code.startswith("gb_") else "CNY"
+                            else:
+                                # 格式2：第一个字段是名称
+                                if self.stock_code.startswith("gb_"):
+                                    # 美股/美股指数数据
+                                    name = self.stock_name
+                                    # 美股数据格式：[名称, 当前价, 涨跌幅, 时间, ...]
+                                    current_price = float(stock_data_list[1])
+                                    change_percent = float(stock_data_list[2])
+                                    change_amount = current_price * change_percent / 100
+                                    prev_close = current_price - change_amount
+                                    open_price = current_price
+                                    volume = 0
+                                    currency = "USD"
+                                else:
+                                    # A股/H股数据
+                                    name = first_field
+                                    # A股数据格式：[名称, 今开价, 昨收价, 当前价格, 最高价, 最低价, 买一价, 卖一价, 成交量, 成交额, ...]
+                                    if len(stock_data_list) >= 11:
+                                        open_price = float(stock_data_list[1])
+                                        prev_close = float(stock_data_list[2])
+                                        current_price = float(stock_data_list[3])
+                                        volume = int(stock_data_list[8])
+                                        change_amount = current_price - prev_close
+                                        change_percent = (change_amount / prev_close) * 100 if prev_close != 0 else 0
+                                        currency = "CNY"
+                                        if self.stock_code.startswith("hk"):
+                                            currency = "HKD"
+                                    else:
+                                        # 数据字段不足，使用简化格式
+                                        current_price = float(stock_data_list[1])
+                                        change_percent = float(stock_data_list[2])
+                                        change_amount = current_price * change_percent / 100
+                                        prev_close = current_price - change_amount
+                                        open_price = current_price
+                                        volume = 0
+                                        currency = "CNY"
                             
-                            # 确保价格字段可以转换为浮点数
-                            try:
-                                # 新浪API字段顺序：
-                                # 0: 股票名称
-                                # 1: 今开价
-                                # 2: 昨收价
-                                # 3: 当前价格
-                                # 4: 最高价
-                                # 5: 最低价
-                                # 6: 买一价
-                                # 7: 卖一价
-                                # 8: 成交量
-                                # 9: 成交额
-                                open_price = float(stock_data_list[1])
-                                prev_close = float(stock_data_list[2])
-                                current_price = float(stock_data_list[3])  # 当前价格在索引3
-                                volume = int(stock_data_list[8])  # 成交量
-                                
-                                _LOGGER.info(f"解析价格数据 - 当前价格: {current_price}, 昨收价: {prev_close}, 今开价: {open_price}")
-                                
-                                # 计算涨跌幅和涨跌额
-                                change_amount = current_price - prev_close
-                                change_percent = (change_amount / prev_close) * 100 if prev_close != 0 else 0
-                                
-                                # 构建返回数据
-                                stock_data = {
-                                    "current_price": current_price,
-                                    "change_amount": change_amount,
-                                    "change_percent": round(change_percent, 2),  # 保留两位小数
-                                    "prev_close": prev_close,
-                                    "open_price": open_price,
-                                    "volume": volume,
-                                    "name": name,
-                                    "code": self.stock_code,
-                                    "currency": "CNY",  # 新浪API主要针对A股，默认使用人民币
-                                    "timestamp": time.time()
-                                }
-                                _LOGGER.info(f"最终解析后的股票数据: {stock_data}")
-                                return stock_data
-                            except ValueError as e:
-                                _LOGGER.error(f"解析价格数据失败: {e}, 原始数据: {stock_data_list[1:4]}")
-                                return None
-                        else:
-                            _LOGGER.error(f"新浪API返回的数据字段不足，期望至少11个字段，实际得到: {len(stock_data_list)}个字段")
+                            # 构建返回数据
+                            stock_data = {
+                                "current_price": current_price,
+                                "change_amount": round(change_amount, 4),
+                                "change_percent": round(change_percent, 2),
+                                "prev_close": round(prev_close, 4),
+                                "open_price": open_price,
+                                "volume": volume,
+                                "name": name,
+                                "code": self.stock_code,
+                                "currency": currency,
+                                "timestamp": time.time()
+                            }
+                            _LOGGER.info(f"最终解析后的股票数据: {stock_data}")
+                            return stock_data
+                        except (ValueError, IndexError) as e:
+                            _LOGGER.error(f"解析股票数据失败: {e}, 代码: {self.stock_code}, 原始数据: {stock_data_list}")
+                            return None
                     else:
                         _LOGGER.error(f"新浪API响应格式错误，无法匹配数据，正则表达式: {pattern}")
                 else:
